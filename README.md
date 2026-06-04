@@ -75,3 +75,9 @@ Static verification command:
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File 'F:\study\Windows\System\Administration\Maintenance\Repair\PowerShell\Automation\windows-cdrive-self-repair-toolkit	ests\Test-Static.ps1'
 ```
+
+
+## Fix notes
+
+- The launcher caches its script path at script scope so scheduled-task installation does not depend on `$MyInvocation.MyCommand.Path` from inside a function, which is null in Windows PowerShell 5 in this context.
+- The scheduled task is created with the ScheduledTasks API first, avoiding `schtasks.exe /TR` argument splitting where `-NoPause` can be misread as a schtasks option.

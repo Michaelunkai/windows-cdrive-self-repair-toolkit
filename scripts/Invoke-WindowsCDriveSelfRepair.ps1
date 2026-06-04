@@ -15,6 +15,8 @@ param(
 )
 $ErrorActionPreference = 'Continue'
 $ProgressPreference = 'SilentlyContinue'
+$Script:ThisScriptPath = if($PSCommandPath){ $PSCommandPath } elseif($MyInvocation.MyCommand.Path){ $MyInvocation.MyCommand.Path } else { $null }
+$Script:RepoRoot = if($Script:ThisScriptPath){ Split-Path -Path (Split-Path -Path $Script:ThisScriptPath -Parent) -Parent } else { $null }
 function Write-Step([string]$Message){ Write-Host ("[{0}] {1}" -f (Get-Date -Format 'HH:mm:ss'), $Message) }
 function Test-Admin {
     try { return ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator) } catch { return $false }
@@ -70,11 +72,22 @@ function global:fixfixfix {
 }
 function Install-WeeklyTask {
     $taskName = 'Weekly Windows Self Repair'
-    $repoRoot = Split-Path -Path (Split-Path -Path $MyInvocation.MyCommand.Path -Parent) -Parent
-    $runner = Join-Path $repoRoot 'run-windows-cdrive-self-repair-toolkit.ps1'
-    $tr = 'powershell.exe -NoProfile -ExecutionPolicy Bypass -File "' + $runner + '" -NoPause'
-    schtasks.exe /Create /F /TN $taskName /SC WEEKLY /D SUN /ST 03:00 /RL HIGHEST /TR $tr | Out-Host
-    Write-Step "Scheduled task installed: $taskName"
+    if([string]::IsNullOrWhiteSpace($Script:RepoRoot)){ Write-Step 'Scheduled task skipped: script path could not be resolved'; return }
+    $runner = Join-Path $Script:RepoRoot 'run-windows-cdrive-self-repair-toolkit.ps1'
+    if(!(Test-Path -LiteralPath $runner)){ Write-Step "Scheduled task skipped: runner missing: $runner"; return }
+    $taskArgs = '-NoProfile -ExecutionPolicy Bypass -File "' + $runner + '" -NoPause -SkipWindowsUpdateReset'
+    try {
+        $action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument $taskArgs
+        $trigger = New-ScheduledTaskTrigger -Weekly -DaysOfWeek Sunday -At 3am
+        $principal = New-ScheduledTaskPrincipal -UserId $env:USERNAME -RunLevel Highest
+        Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Principal $principal -Force | Out-Null
+        Write-Step "Scheduled task installed: $taskName"
+    } catch {
+        Write-Step "ScheduledTasks API failed, falling back to schtasks.exe: $($_.Exception.Message)"
+        $tr = 'powershell.exe ' + $taskArgs
+        & schtasks.exe /Create /F /TN $taskName /SC WEEKLY /D SUN /ST 03:00 /RL HIGHEST /TR $tr | Out-Host
+        if($LASTEXITCODE -eq 0){ Write-Step "Scheduled task installed: $taskName" } else { Write-Step "Scheduled task failed: schtasks exit=$LASTEXITCODE" }
+    }
 }
 function Try-RestorePoint {
     if($SkipRestorePoint){ Write-Step 'Restore point skipped by flag'; return }
