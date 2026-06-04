@@ -1,0 +1,29 @@
+# PowerShell / Windows transient files
+*.log
+*.tmp
+*.bak
+*.old
+*.swp
+*.swo
+Thumbs.db
+Desktop.ini
+
+# Secrets / local env
+.env
+.env.*
+*.key
+*.pem
+*.pfx
+
+# Caches / build outputs
+__pycache__/
+.pytest_cache/
+.venv/
+venv/
+dist/
+build/
+.cache/
+
+# Keep archived mission artifacts
+!artifacts/
+!artifacts/**
