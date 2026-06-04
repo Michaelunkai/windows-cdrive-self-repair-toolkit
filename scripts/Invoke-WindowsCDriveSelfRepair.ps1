@@ -79,13 +79,15 @@ function Install-WeeklyTask {
     try {
         $action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument $taskArgs
         $trigger = New-ScheduledTaskTrigger -Weekly -DaysOfWeek Sunday -At 3am
-        $principal = New-ScheduledTaskPrincipal -UserId $env:USERNAME -RunLevel Highest
-        Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Principal $principal -Force | Out-Null
+        $identity = [Security.Principal.WindowsIdentity]::GetCurrent().Name
+        $principal = New-ScheduledTaskPrincipal -UserId $identity -RunLevel Highest -LogonType Interactive
+        Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Principal $principal -Force -ErrorAction Stop | Out-Null
         Write-Step "Scheduled task installed: $taskName"
     } catch {
         Write-Step "ScheduledTasks API failed, falling back to schtasks.exe: $($_.Exception.Message)"
         $tr = 'powershell.exe ' + $taskArgs
-        & schtasks.exe /Create /F /TN $taskName /SC WEEKLY /D SUN /ST 03:00 /RL HIGHEST /TR $tr | Out-Host
+        $quotedTr = '"' + $tr.Replace('"','\"') + '"'
+        & schtasks.exe /Create /F /TN $taskName /SC WEEKLY /D SUN /ST 03:00 /RL HIGHEST /TR $quotedTr | Out-Host
         if($LASTEXITCODE -eq 0){ Write-Step "Scheduled task installed: $taskName" } else { Write-Step "Scheduled task failed: schtasks exit=$LASTEXITCODE" }
     }
 }

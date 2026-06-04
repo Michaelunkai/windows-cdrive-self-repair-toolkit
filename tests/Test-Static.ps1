@@ -11,6 +11,10 @@ foreach($f in $files){
     if($errs.Count -gt 0){ throw ("Parse failed: $f " + ($errs | ForEach-Object { $_.Message } | Out-String)) }
 }
 $payloadPath = Join-Path $root 'scripts\Invoke-WindowsCDriveSelfRepair.ps1'
+$launcherText = Get-Content -Raw -LiteralPath (Join-Path $root 'run-windows-cdrive-self-repair-toolkit.ps1')
+if($launcherText -match '\$argsList\s*=\s*@\(\)' -or $launcherText -match '& \$payload @argsList'){
+    throw 'Root launcher uses string-array switch splatting; use hashtable splatting'
+}
 $payloadText = Get-Content -Raw -LiteralPath $payloadPath
 $mustContain = @('dism.exe','sfc.exe','chkdsk.exe','Repair-Volume','Register-ScheduledTask','Checkpoint-Computer')
 foreach($m in $mustContain){ if($payloadText -notlike "*$m*"){ throw "Missing expected repair primitive: $m" } }
@@ -22,5 +26,11 @@ if($payloadText -match '\$tr\s*=.*-NoPause'){
 }
 if($payloadText -notmatch '\$Script:RepoRoot'){
     throw 'Script path is not cached at script scope'
+}
+if($payloadText -match 'New-ScheduledTaskPrincipal -UserId \$env:USERNAME'){
+    throw 'Unsafe scheduled task principal uses bare username'
+}
+if($payloadText -match 'Register-ScheduledTask[\s\S]*?\| Out-Null' -and $payloadText -notmatch 'Register-ScheduledTask[\s\S]*?-ErrorAction Stop[\s\S]*?\| Out-Null'){
+    throw 'Register-ScheduledTask is missing ErrorAction Stop'
 }
 'PASS parse/static verification plus regression checks'
