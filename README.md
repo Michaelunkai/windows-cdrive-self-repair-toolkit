@@ -31,19 +31,22 @@ The root launcher runs `scripts/Invoke-WindowsCDriveSelfRepair.ps1`, which:
 From Windows PowerShell:
 
 ```powershell
-& 'F:\study\Windows\System\Administration\Maintenance\Repair\PowerShell\Automation\windows-cdrive-self-repair-toolkitun-windows-cdrive-self-repair-toolkit.ps1'
+& 'F:\study\Windows\System\Administration\Maintenance\Repair\PowerShell\Automation\windows-cdrive-self-repair-toolkit
+un-windows-cdrive-self-repair-toolkit.ps1'
 ```
 
 Install the functions and scheduled task without running the heavy repair pass now:
 
 ```powershell
-& 'F:\study\Windows\System\Administration\Maintenance\Repair\PowerShell\Automation\windows-cdrive-self-repair-toolkitun-windows-cdrive-self-repair-toolkit.ps1' -InstallOnly
+& 'F:\study\Windows\System\Administration\Maintenance\Repair\PowerShell\Automation\windows-cdrive-self-repair-toolkit
+un-windows-cdrive-self-repair-toolkit.ps1' -InstallOnly
 ```
 
 Skip restore point creation if it is slow or disabled:
 
 ```powershell
-& 'F:\study\Windows\System\Administration\Maintenance\Repair\PowerShell\Automation\windows-cdrive-self-repair-toolkitun-windows-cdrive-self-repair-toolkit.ps1' -SkipRestorePoint
+& 'F:\study\Windows\System\Administration\Maintenance\Repair\PowerShell\Automation\windows-cdrive-self-repair-toolkit
+un-windows-cdrive-self-repair-toolkit.ps1' -SkipRestorePoint
 ```
 
 ## Important files
@@ -60,6 +63,10 @@ Skip restore point creation if it is slow or disabled:
 - If DISM or SFC reports repaired files, run the tool once more after it finishes.
 - If `chkdsk` reports it cannot repair online, schedule an offline repair during reboot with `chkdsk C: /f`.
 - If Windows Update cache rename is skipped because files are busy, reboot and run again.
+
+## Repository
+
+https://github.com/Michaelunkai/windows-cdrive-self-repair-toolkit
 
 ## Verification
 
