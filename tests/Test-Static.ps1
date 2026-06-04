@@ -33,4 +33,25 @@ if($payloadText -match 'New-ScheduledTaskPrincipal -UserId \$env:USERNAME'){
 if($payloadText -match 'Register-ScheduledTask[\s\S]*?\| Out-Null' -and $payloadText -notmatch 'Register-ScheduledTask[\s\S]*?-ErrorAction Stop[\s\S]*?\| Out-Null'){
     throw 'Register-ScheduledTask is missing ErrorAction Stop'
 }
-'PASS parse/static verification plus regression checks'
+if($payloadText -notmatch 'function Invoke-Native[\s\S]*System.Diagnostics.Process[\s\S]*Write-Heartbeat'){
+    throw 'Native repair commands are not wrapped with live heartbeat progress'
+}
+if($payloadText -notmatch 'Start-Sleep -Milliseconds 100'){
+    throw 'Live polling loop missing 100ms sleep cadence'
+}
+if($payloadText -notmatch 'TotalMilliseconds -ge 750'){
+    throw 'Heartbeat cadence must be under one second'
+}
+if($payloadText -match 'Start-Sleep -Seconds 3'){
+    throw 'Silent multi-second sleep still present'
+}
+if($payloadText -notmatch 'CommandTimeoutMinutes'){
+    throw 'Command timeout parameter missing'
+}
+if($payloadText -notmatch 'SelfTestProgress'){
+    throw 'SelfTestProgress verification mode missing'
+}
+if($launcherText -notmatch 'SelfTestProgress'){
+    throw 'Root launcher does not forward SelfTestProgress'
+}
+'PASS parse/static verification plus live-progress regression checks'

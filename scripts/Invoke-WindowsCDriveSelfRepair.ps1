@@ -11,22 +11,151 @@ param(
     [switch]$InstallOnly,
     [switch]$SkipRestorePoint,
     [switch]$SkipWindowsUpdateReset,
-    [switch]$NoPause
+    [switch]$NoPause,
+    [int]$CommandTimeoutMinutes = 180,
+    [switch]$SelfTestProgress
 )
 $ErrorActionPreference = 'Continue'
 $ProgressPreference = 'SilentlyContinue'
 $Script:ThisScriptPath = if($PSCommandPath){ $PSCommandPath } elseif($MyInvocation.MyCommand.Path){ $MyInvocation.MyCommand.Path } else { $null }
 $Script:RepoRoot = if($Script:ThisScriptPath){ Split-Path -Path (Split-Path -Path $Script:ThisScriptPath -Parent) -Parent } else { $null }
-function Write-Step([string]$Message){ Write-Host ("[{0}] {1}" -f (Get-Date -Format 'HH:mm:ss'), $Message) }
+function Write-Step([string]$Message){ Write-Host ("[{0}] {1}" -f (Get-Date -Format 'HH:mm:ss.fff'), $Message) }
 function Test-Admin {
     try { return ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator) } catch { return $false }
 }
-function Invoke-Native([string]$Name, [string]$File, [string[]]$Args){
-    Write-Step $Name
-    & $File @Args
-    $code = $LASTEXITCODE
-    Write-Step ("{0} exit={1}" -f $Name,$code)
+function Write-Heartbeat([string]$Name, [datetime]$Start, [string]$Extra){
+    $elapsed = [int]((Get-Date) - $Start).TotalSeconds
+    if([string]::IsNullOrWhiteSpace($Extra)){ $Extra = 'working' }
+    Write-Step ("{0} still running elapsed={1}s {2}" -f $Name,$elapsed,$Extra)
+}
+function ConvertTo-NativeArgumentString([string[]]$NativeArgs){
+    $quoted = @()
+    foreach($a in $NativeArgs){
+        if($null -eq $a){ continue }
+        $s = [string]$a
+        if($s -match '[\s\";{}()]'){
+            $quoted += '"' + $s.Replace('\\','\\').Replace('"','\"') + '"'
+        } else { $quoted += $s }
+    }
+    return ($quoted -join ' ')
+}
+function Invoke-Native([string]$Name, [string]$File, [string[]]$NativeArgs, [int]$TimeoutMinutes = $CommandTimeoutMinutes){
+    Write-Step ("{0} start: {1} {2}" -f $Name,$File,($NativeArgs -join ' '))
+    $start = Get-Date
+    $tmpBase = Join-Path $env:TEMP ("hermes-repair-{0}-{1}" -f ([guid]::NewGuid().ToString('N')),$Name.Replace(' ','_').Replace(':','_'))
+    $outFile = $tmpBase + '.out.log'
+    $errFile = $tmpBase + '.err.log'
+    try {
+        $psi = New-Object System.Diagnostics.ProcessStartInfo
+        $psi.FileName = $File
+        $psi.Arguments = ConvertTo-NativeArgumentString $NativeArgs
+        $psi.UseShellExecute = $false
+        $psi.CreateNoWindow = $true
+        $psi.RedirectStandardOutput = $true
+        $psi.RedirectStandardError = $true
+        $proc = New-Object System.Diagnostics.Process
+        $proc.StartInfo = $psi
+        $null = $proc.Start()
+        $stdoutTask = $proc.StandardOutput.ReadToEndAsync()
+        $stderrTask = $proc.StandardError.ReadToEndAsync()
+    } catch { Write-Step ("{0} failed to start: {1}" -f $Name,$_.Exception.Message); return 9999 }
+    $outPos = 0L; $errPos = 0L; $lastBeat = Get-Date; $lastActivity = Get-Date
+    while(-not $proc.HasExited){
+        foreach($pair in @(@($outFile,'OUT'),@($errFile,'ERR'))){
+            $path = $pair[0]; $tag = $pair[1]
+            if(Test-Path -LiteralPath $path){
+                $fs = $null
+                try {
+                    $fs = [IO.File]::Open($path,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::ReadWrite)
+                    $posVar = if($tag -eq 'OUT'){ 'outPos' } else { 'errPos' }
+                    $oldPos = Get-Variable -Name $posVar -ValueOnly
+                    if($fs.Length -gt $oldPos){
+                        $fs.Seek($oldPos,[IO.SeekOrigin]::Begin) | Out-Null
+                        $sr = New-Object IO.StreamReader($fs)
+                        $chunk = $sr.ReadToEnd()
+                        Set-Variable -Name $posVar -Value $fs.Position
+                        $sr.Close(); $fs = $null
+                        foreach($line in ($chunk -split "`r?`n")){
+                            if($line.Trim().Length -gt 0){ Write-Step ("{0} {1}: {2}" -f $Name,$tag,$line.TrimEnd()); $lastActivity = Get-Date }
+                        }
+                    }
+                } catch { } finally { if($fs){ $fs.Close() } }
+            }
+        }
+        $now = Get-Date
+        if(($now - $lastBeat).TotalMilliseconds -ge 750){
+            $silent = [int]($now - $lastActivity).TotalSeconds
+            Write-Heartbeat $Name $start ("pid={0} no-new-output={1}s" -f $proc.Id,$silent)
+            $lastBeat = $now
+        }
+        if($TimeoutMinutes -gt 0 -and ((Get-Date) - $start).TotalMinutes -ge $TimeoutMinutes){
+            Write-Step ("{0} timeout after {1} minutes; stopping pid={2}" -f $Name,$TimeoutMinutes,$proc.Id)
+            try { Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue } catch {}
+            return 124
+        }
+        Start-Sleep -Milliseconds 100
+        try { $proc.Refresh() } catch {}
+    }
+    foreach($pair in @(@($outFile,'OUT'),@($errFile,'ERR'))){
+        $path = $pair[0]; $tag = $pair[1]
+        if(Test-Path -LiteralPath $path){
+            $fs = $null
+            try {
+                $fs = [IO.File]::Open($path,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::ReadWrite)
+                $posVar = if($tag -eq 'OUT'){ 'outPos' } else { 'errPos' }
+                $oldPos = Get-Variable -Name $posVar -ValueOnly
+                if($fs.Length -gt $oldPos){
+                    $fs.Seek($oldPos,[IO.SeekOrigin]::Begin) | Out-Null
+                    $sr = New-Object IO.StreamReader($fs)
+                    $chunk = $sr.ReadToEnd()
+                    Set-Variable -Name $posVar -Value $fs.Position
+                    $sr.Close(); $fs = $null
+                    foreach($line in ($chunk -split "`r?`n")){
+                        if($line.Trim().Length -gt 0){ Write-Step ("{0} {1}: {2}" -f $Name,$tag,$line.TrimEnd()) }
+                    }
+                }
+            } catch { } finally { if($fs){ $fs.Close() } }
+        }
+    }
+    try { $proc.WaitForExit(); $proc.Refresh() } catch {}
+    try {
+        $stdout = $stdoutTask.Result
+        $stderr = $stderrTask.Result
+        foreach($line in ($stdout -split "`r?`n")){ if($line.Trim().Length -gt 0){ Write-Step ("{0} OUT: {1}" -f $Name,$line.TrimEnd()) } }
+        foreach($line in ($stderr -split "`r?`n")){ if($line.Trim().Length -gt 0){ Write-Step ("{0} ERR: {1}" -f $Name,$line.TrimEnd()) } }
+    } catch { Write-Step ("{0} output collection skipped: {1}" -f $Name,$_.Exception.Message) }
+    $code = $proc.ExitCode
+    if($null -eq $code){ $code = -1 }
+    $elapsed = [int]((Get-Date) - $start).TotalSeconds
+    Write-Step ("{0} exit={1} elapsed={2}s" -f $Name,$code,$elapsed)
+    foreach($path in @($outFile,$errFile)){ try { Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue } catch {} }
     return $code
+}
+function Invoke-BlockLive([string]$Name, [scriptblock]$Block, [int]$TimeoutMinutes = 30){
+    Write-Step ("{0} start" -f $Name)
+    $start = Get-Date
+    $job = Start-Job -ScriptBlock $Block
+    $lastBeat = Get-Date
+    while($job.State -eq 'Running'){
+        $now = Get-Date
+        if(($now - $lastBeat).TotalMilliseconds -ge 750){ Write-Heartbeat $Name $start ("job={0}" -f $job.Id); $lastBeat = $now }
+        if($TimeoutMinutes -gt 0 -and ((Get-Date) - $start).TotalMinutes -ge $TimeoutMinutes){
+            Write-Step ("{0} timeout after {1} minutes; stopping job={2}" -f $Name,$TimeoutMinutes,$job.Id)
+            Stop-Job $job -Force -ErrorAction SilentlyContinue
+            Remove-Job $job -Force -ErrorAction SilentlyContinue
+            return 124
+        }
+        Start-Sleep -Milliseconds 100
+        $job = Get-Job -Id $job.Id
+    }
+    $output = Receive-Job $job -Keep -ErrorAction SilentlyContinue 2>&1
+    foreach($line in $output){ if(($line | Out-String).Trim().Length -gt 0){ Write-Step ("{0}: {1}" -f $Name,($line | Out-String).Trim()) } }
+    $state = $job.State
+    Remove-Job $job -Force -ErrorAction SilentlyContinue
+    $elapsed = [int]((Get-Date) - $start).TotalSeconds
+    Write-Step ("{0} complete state={1} elapsed={2}s" -f $Name,$state,$elapsed)
+    if($state -eq 'Failed'){ return 1 }
+    return 0
 }
 function Ensure-AdminRelaunch {
     if(Test-Admin){ return $true }
@@ -105,7 +234,7 @@ function Reset-WindowsUpdateLite {
         $null = sc.exe query $svc 2>$null
         $null = sc.exe stop $svc 2>$null
     }
-    Start-Sleep -Seconds 3
+    foreach($i in 1..3){ Write-Step ("Windows Update reset wait {0}/3" -f $i); Start-Sleep -Seconds 1 }
     $sd = Join-Path $env:windir 'SoftwareDistribution'
     $cat = Join-Path $env:windir 'System32\catroot2'
     foreach($path in @($sd,$cat)){
@@ -124,9 +253,14 @@ function Invoke-WindowsCDriveRepair {
     Invoke-Native 'SFC scannow' 'sfc.exe' @('/scannow') | Out-Null
     Invoke-Native 'DISM startcomponentcleanup' 'dism.exe' @('/online','/cleanup-image','/startcomponentcleanup') | Out-Null
     Invoke-Native 'CHKDSK online scan C:' 'chkdsk.exe' @('C:','/scan') | Out-Null
-    try { Write-Step 'Repair-Volume C: scan'; Repair-Volume -DriveLetter C -Scan } catch { Write-Step ("Repair-Volume skipped: " + $_.Exception.Message) }
+    Invoke-BlockLive 'Repair-Volume C: scan' { Repair-Volume -DriveLetter C -Scan } 60 | Out-Null
     Reset-WindowsUpdateLite
     Invoke-Native 'DISM analyzecomponentstore' 'dism.exe' @('/online','/cleanup-image','/analyzecomponentstore') | Out-Null
+}
+if($SelfTestProgress){
+    Invoke-Native 'SELFTEST live progress 3s' 'powershell.exe' @('-NoProfile','-Command','$end=(Get-Date).AddSeconds(3); while((Get-Date) -lt $end){ Start-Sleep -Milliseconds 100 }; Write-Output SELFTEST_DONE') 1 | Out-Null
+    Write-Step 'SELFTEST DONE'
+    return
 }
 if(-not (Ensure-AdminRelaunch)){ return }
 Install-ProfileFunctions
