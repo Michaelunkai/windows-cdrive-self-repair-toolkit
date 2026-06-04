@@ -8,7 +8,7 @@ This project was created from the Telegram `/study` packaging of the completed `
 
 ### Real-time progress mode
 
-Every long native repair command is now run through a live monitor that prints timestamped heartbeat lines at sub-second cadence while the child process is still running. This prevents the terminal from looking frozen during quiet phases of DISM, SFC, CHKDSK, and Repair-Volume. The monitor also supports `-CommandTimeoutMinutes` so a broken child process is not allowed to wait forever.
+Every long native repair command is now run through a live monitor that updates one console status line once per second instead of spamming duplicate lines. The status shows the exact active tool, elapsed time, child PID, alive state, CPU seconds used, RAM, and the latest useful DISM/CBS log line when available. Real tool stdout/stderr is printed as separate permanent lines. The monitor also supports `-CommandTimeoutMinutes` so a broken child process is not allowed to wait forever.
 
 
 The root launcher runs `scripts/Invoke-WindowsCDriveSelfRepair.ps1`, which:

@@ -19,14 +19,62 @@ $ErrorActionPreference = 'Continue'
 $ProgressPreference = 'SilentlyContinue'
 $Script:ThisScriptPath = if($PSCommandPath){ $PSCommandPath } elseif($MyInvocation.MyCommand.Path){ $MyInvocation.MyCommand.Path } else { $null }
 $Script:RepoRoot = if($Script:ThisScriptPath){ Split-Path -Path (Split-Path -Path $Script:ThisScriptPath -Parent) -Parent } else { $null }
-function Write-Step([string]$Message){ Write-Host ("[{0}] {1}" -f (Get-Date -Format 'HH:mm:ss.fff'), $Message) }
+$Script:LiveLineActive = $false
+function Clear-LiveLine {
+    if($Script:LiveLineActive){
+        try { Write-Host ("`r" + (' ' * ([Math]::Max(1,[Console]::WindowWidth - 1))) + "`r") -NoNewline } catch { Write-Host '' }
+        $Script:LiveLineActive = $false
+    }
+}
+function Write-Step([string]$Message){
+    Clear-LiveLine
+    Write-Host ("[{0}] {1}" -f (Get-Date -Format 'HH:mm:ss.fff'), $Message)
+}
+function Write-LiveLine([string]$Message){
+    $text = "[{0}] {1}" -f (Get-Date -Format 'HH:mm:ss.fff'), $Message
+    try {
+        $width = [Math]::Max(20,[Console]::WindowWidth - 1)
+        if($text.Length -gt $width){ $text = $text.Substring(0,$width-1) }
+        Write-Host ("`r" + $text.PadRight($width)) -NoNewline
+        $Script:LiveLineActive = $true
+    } catch { Write-Host $text; $Script:LiveLineActive = $false }
+}
+
 function Test-Admin {
     try { return ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator) } catch { return $false }
 }
-function Write-Heartbeat([string]$Name, [datetime]$Start, [string]$Extra){
+function Get-LastUsefulLogLine([string[]]$Paths, [datetime]$Since){
+    foreach($lp in $Paths){
+        try {
+            if(Test-Path -LiteralPath $lp){
+                $lines = Get-Content -LiteralPath $lp -Tail 8 -ErrorAction SilentlyContinue
+                for($i=$lines.Count-1; $i -ge 0; $i--){
+                    $line = ([string]$lines[$i]).Trim()
+                    if($line.Length -gt 0 -and $line -notmatch '^={3,}$'){
+                        return (Split-Path -Leaf $lp) + ': ' + $line
+                    }
+                }
+            }
+        } catch {}
+    }
+    return ''
+}
+function Write-Heartbeat([string]$Name, [datetime]$Start, [string]$Phase, [int]$ChildPid, [double]$CpuStart, [int64]$WsStart, [string[]]$LogPaths){
     $elapsed = [int]((Get-Date) - $Start).TotalSeconds
-    if([string]::IsNullOrWhiteSpace($Extra)){ $Extra = 'working' }
-    Write-Step ("{0} still running elapsed={1}s {2}" -f $Name,$elapsed,$Extra)
+    $cpuNow = 0.0; $wsNow = 0L; $alive = $true
+    try {
+        $gp = Get-Process -Id $ChildPid -ErrorAction Stop
+        if($gp.CPU -ne $null){ $cpuNow = [double]$gp.CPU }
+        $wsNow = [int64]$gp.WorkingSet64
+    } catch { $alive = $false }
+    $cpuDelta = [Math]::Round(($cpuNow - $CpuStart),1)
+    $wsMb = [Math]::Round(($wsNow / 1MB),0)
+    $log = Get-LastUsefulLogLine $LogPaths $Start
+    if($log.Length -gt 110){ $log = $log.Substring(0,110) }
+    if([string]::IsNullOrWhiteSpace($Phase)){ $Phase = 'waiting for tool/log output' }
+    $msg = "{0} | {1}s | phase={2} | pid={3} alive={4} cpu+={5}s ram={6}MB" -f $Name,$elapsed,$Phase,$ChildPid,$alive,$cpuDelta,$wsMb
+    if(-not [string]::IsNullOrWhiteSpace($log)){ $msg += " | latest-log=" + $log }
+    Write-LiveLine $msg
 }
 function ConvertTo-NativeArgumentString([string[]]$NativeArgs){
     $quoted = @()
@@ -39,7 +87,7 @@ function ConvertTo-NativeArgumentString([string[]]$NativeArgs){
     }
     return ($quoted -join ' ')
 }
-function Invoke-Native([string]$Name, [string]$File, [string[]]$NativeArgs, [int]$TimeoutMinutes = $CommandTimeoutMinutes){
+function Invoke-Native([string]$Name, [string]$File, [string[]]$NativeArgs, [int]$TimeoutMinutes = $CommandTimeoutMinutes, [string[]]$LogPaths = @()){
     Write-Step ("{0} start: {1} {2}" -f $Name,$File,($NativeArgs -join ' '))
     $start = Get-Date
     $tmpBase = Join-Path $env:TEMP ("hermes-repair-{0}-{1}" -f ([guid]::NewGuid().ToString('N')),$Name.Replace(' ','_').Replace(':','_'))
@@ -59,7 +107,7 @@ function Invoke-Native([string]$Name, [string]$File, [string[]]$NativeArgs, [int
         $stdoutTask = $proc.StandardOutput.ReadToEndAsync()
         $stderrTask = $proc.StandardError.ReadToEndAsync()
     } catch { Write-Step ("{0} failed to start: {1}" -f $Name,$_.Exception.Message); return 9999 }
-    $outPos = 0L; $errPos = 0L; $lastBeat = Get-Date; $lastActivity = Get-Date
+    $outPos = 0L; $errPos = 0L; $lastBeat = Get-Date; $lastActivity = Get-Date; $lastPhase = "starting"; $cpuStart = 0.0; $wsStart = 0L; try { $gp0=Get-Process -Id $proc.Id -ErrorAction Stop; if($gp0.CPU -ne $null){$cpuStart=[double]$gp0.CPU}; $wsStart=[int64]$gp0.WorkingSet64 } catch {}
     while(-not $proc.HasExited){
         foreach($pair in @(@($outFile,'OUT'),@($errFile,'ERR'))){
             $path = $pair[0]; $tag = $pair[1]
@@ -76,19 +124,19 @@ function Invoke-Native([string]$Name, [string]$File, [string[]]$NativeArgs, [int
                         Set-Variable -Name $posVar -Value $fs.Position
                         $sr.Close(); $fs = $null
                         foreach($line in ($chunk -split "`r?`n")){
-                            if($line.Trim().Length -gt 0){ Write-Step ("{0} {1}: {2}" -f $Name,$tag,$line.TrimEnd()); $lastActivity = Get-Date }
+                            if($line.Trim().Length -gt 0){ $lastPhase = $line.TrimEnd(); Write-Step ("{0} {1}: {2}" -f $Name,$tag,$line.TrimEnd()); $lastActivity = Get-Date }
                         }
                     }
                 } catch { } finally { if($fs){ $fs.Close() } }
             }
         }
         $now = Get-Date
-        if(($now - $lastBeat).TotalMilliseconds -ge 750){
-            $silent = [int]($now - $lastActivity).TotalSeconds
-            Write-Heartbeat $Name $start ("pid={0} no-new-output={1}s" -f $proc.Id,$silent)
+        if(($now - $lastBeat).TotalSeconds -ge 1){
+            Write-Heartbeat $Name $start $lastPhase $proc.Id $cpuStart $wsStart $LogPaths
             $lastBeat = $now
         }
         if($TimeoutMinutes -gt 0 -and ((Get-Date) - $start).TotalMinutes -ge $TimeoutMinutes){
+            Clear-LiveLine
             Write-Step ("{0} timeout after {1} minutes; stopping pid={2}" -f $Name,$TimeoutMinutes,$proc.Id)
             try { Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue } catch {}
             return 124
@@ -127,6 +175,7 @@ function Invoke-Native([string]$Name, [string]$File, [string[]]$NativeArgs, [int
     $code = $proc.ExitCode
     if($null -eq $code){ $code = -1 }
     $elapsed = [int]((Get-Date) - $start).TotalSeconds
+    Clear-LiveLine
     Write-Step ("{0} exit={1} elapsed={2}s" -f $Name,$code,$elapsed)
     foreach($path in @($outFile,$errFile)){ try { Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue } catch {} }
     return $code
@@ -247,18 +296,18 @@ function Reset-WindowsUpdateLite {
 }
 function Invoke-WindowsCDriveRepair {
     Try-RestorePoint
-    Invoke-Native 'DISM checkhealth' 'dism.exe' @('/online','/cleanup-image','/checkhealth') | Out-Null
-    Invoke-Native 'DISM scanhealth' 'dism.exe' @('/online','/cleanup-image','/scanhealth') | Out-Null
-    Invoke-Native 'DISM restorehealth' 'dism.exe' @('/online','/cleanup-image','/restorehealth') | Out-Null
-    Invoke-Native 'SFC scannow' 'sfc.exe' @('/scannow') | Out-Null
-    Invoke-Native 'DISM startcomponentcleanup' 'dism.exe' @('/online','/cleanup-image','/startcomponentcleanup') | Out-Null
-    Invoke-Native 'CHKDSK online scan C:' 'chkdsk.exe' @('C:','/scan') | Out-Null
+    Invoke-Native 'DISM checkhealth' 'dism.exe' @('/online','/cleanup-image','/checkhealth') $CommandTimeoutMinutes @((Join-Path $env:windir 'Logs\DISM\dism.log')) | Out-Null
+    Invoke-Native 'DISM scanhealth' 'dism.exe' @('/online','/cleanup-image','/scanhealth') $CommandTimeoutMinutes @((Join-Path $env:windir 'Logs\DISM\dism.log')) | Out-Null
+    Invoke-Native 'DISM restorehealth' 'dism.exe' @('/online','/cleanup-image','/restorehealth') $CommandTimeoutMinutes @((Join-Path $env:windir 'Logs\DISM\dism.log')) | Out-Null
+    Invoke-Native 'SFC scannow' 'sfc.exe' @('/scannow') $CommandTimeoutMinutes @((Join-Path $env:windir 'Logs\CBS\CBS.log')) | Out-Null
+    Invoke-Native 'DISM startcomponentcleanup' 'dism.exe' @('/online','/cleanup-image','/startcomponentcleanup') $CommandTimeoutMinutes @((Join-Path $env:windir 'Logs\DISM\dism.log')) | Out-Null
+    Invoke-Native 'CHKDSK online scan C:' 'chkdsk.exe' @('C:','/scan') $CommandTimeoutMinutes @() | Out-Null
     Invoke-BlockLive 'Repair-Volume C: scan' { Repair-Volume -DriveLetter C -Scan } 60 | Out-Null
     Reset-WindowsUpdateLite
-    Invoke-Native 'DISM analyzecomponentstore' 'dism.exe' @('/online','/cleanup-image','/analyzecomponentstore') | Out-Null
+    Invoke-Native 'DISM analyzecomponentstore' 'dism.exe' @('/online','/cleanup-image','/analyzecomponentstore') $CommandTimeoutMinutes @((Join-Path $env:windir 'Logs\DISM\dism.log')) | Out-Null
 }
 if($SelfTestProgress){
-    Invoke-Native 'SELFTEST live progress 3s' 'powershell.exe' @('-NoProfile','-Command','$end=(Get-Date).AddSeconds(3); while((Get-Date) -lt $end){ Start-Sleep -Milliseconds 100 }; Write-Output SELFTEST_DONE') 1 | Out-Null
+    Invoke-Native 'SELFTEST live progress 3s' 'powershell.exe' @('-NoProfile','-Command','$end=(Get-Date).AddSeconds(3); while((Get-Date) -lt $end){ Start-Sleep -Milliseconds 100 }; Write-Output SELFTEST_DONE') 1 @() | Out-Null
     Write-Step 'SELFTEST DONE'
     return
 }

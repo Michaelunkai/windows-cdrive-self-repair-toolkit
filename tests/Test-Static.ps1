@@ -36,11 +36,14 @@ if($payloadText -match 'Register-ScheduledTask[\s\S]*?\| Out-Null' -and $payload
 if($payloadText -notmatch 'function Invoke-Native[\s\S]*System.Diagnostics.Process[\s\S]*Write-Heartbeat'){
     throw 'Native repair commands are not wrapped with live heartbeat progress'
 }
-if($payloadText -notmatch 'Start-Sleep -Milliseconds 100'){
-    throw 'Live polling loop missing 100ms sleep cadence'
+if($payloadText -notmatch 'Write-LiveLine'){
+    throw 'Live status must update a single console line instead of spamming duplicate lines'
 }
-if($payloadText -notmatch 'TotalMilliseconds -ge 750'){
-    throw 'Heartbeat cadence must be under one second'
+if($payloadText -notmatch 'Get-LastUsefulLogLine'){
+    throw 'Live status must include latest tool log context'
+}
+if($payloadText -match 'no-new-output=') {
+    throw 'Generic no-new-output spam must not be used as progress'
 }
 if($payloadText -match 'Start-Sleep -Seconds 3'){
     throw 'Silent multi-second sleep still present'
